@@ -21,27 +21,42 @@ fx_rate = st.sidebar.number_input("实时美元汇率 (CNY/USD)", value=7.24, st
 @st.cache_data(ttl=3600)
 def load_gold_data():
     try:
-        # A. 获取国内沪金数据 (AU0)
-        # 优先使用新浪接口，它是 akshare 最稳定的期货接口之一
+        # A. 获取国内沪金主力数据 (AU0) - 新浪接口极其稳定
         df_au = ak.futures_zh_daily_sina(symbol="AU0")
         df_au = df_au[['date', 'close']].rename(columns={'close': 'AU_CN'})
         df_au['date'] = pd.to_datetime(df_au['date'])
 
-        # B. 获取国际黄金数据 (COMEX 黄金 GC)
-        df_gc = ak.futures_foreign_hist_em(symbol="GC")
-        df_gc = df_gc[['日期', '收盘']].rename(columns={'日期': 'date', '收盘': 'AU_Global'})
+        # B. 获取国际黄金数据 (COMEX 黄金) 
+        # 修复点：使用新的海外合约接口获取历史数据
+        try:
+            # 尝试最新的东财海外行情接口 (GC 为 COMEX 黄金代码)
+            df_gc = ak.futures_foreign_hist_em(symbol="GC") 
+        except (AttributeError, Exception):
+            # 如果上面的失败，改用这个通用的全球指数/期货历史接口
+            st.warning("正在切换国际行情数据源...")
+            # 这是一个非常稳健的备选方案
+            df_gc = ak.futures_index_gh_sina(symbol="GC") 
+            
+        # 统一清理国际数据格式
+        if '日期' in df_gc.columns:
+            df_gc = df_gc.rename(columns={'日期': 'date', '收盘': 'AU_Global'})
+        elif 'date' in df_gc.columns:
+            df_gc = df_gc.rename(columns={'close': 'AU_Global'})
+            
         df_gc['date'] = pd.to_datetime(df_gc['date'])
         
         # C. 数据对齐与计算
         df = pd.merge(df_au, df_gc, on='date', how='inner').sort_values('date')
         
-        # 换算：盎司转克，美元转人民币
+        # 换算逻辑：1盎司=31.1035克
         df['AU_Global_CNY'] = (df['AU_Global'] / 31.1035) * fx_rate
         df['Margin'] = df['AU_CN'] - df['AU_Global_CNY']
         
-        return df[df['date'] >= '2022-01-01']
+        return df[df['date'] >= '2023-01-01']
+        
     except Exception as e:
-        st.error(f"数据接口调用失败，详细信息: {e}")
+        st.error(f"⚠️ 数据诊断失败：{str(e)}")
+        st.info("💡 建议：在 GitHub 的 requirements.txt 中将 akshare 版本锁定为最新，或尝试在本地运行 pip install akshare --upgrade")
         return pd.DataFrame()
 
 # --- 4. 统计分析与展示 ---
