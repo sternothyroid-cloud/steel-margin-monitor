@@ -1,35 +1,85 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+import akshare as ak
+
+# --- 1. 页面配置 ---
+st.set_page_config(page_title="黄金内外盘套利看板", layout="wide")
+st.title("🏆 黄金内外盘价差统计套利看板")
+
+st.latex(r'''
+\text{Spread} = \text{Price}_{CN} - (\frac{\text{Price}_{Global}}{31.1035} \times \text{ExchangeRate})
+''')
+
+# --- 2. 侧边栏配置 ---
+st.sidebar.header("参数配置")
+window = st.sidebar.slider("统计窗口 (天)", 30, 500, 120)
+
+# --- 3. 数据抓取与对齐 ---
 @st.cache_data(ttl=3600)
-def load_gold_data():
+def load_gold_arb_data():
     try:
-        # 1. 获取沪金主力数据 (人民币/克)
+        # 抓取国内沪金主力行情 (AU0)
         df_au = ak.futures_main_history_em(symbol="AU0")
-        df_au = df_au[['日期', '收盘']]
-        df_au.columns = ['date', 'AU_Domestic']
-        df_au['date'] = pd.to_datetime(df_au['date'])
-
-        # 2. 获取美元兑人民币汇率 (用于折算)
-        # 实际操作中应使用实时汇率，这里取近似或历史汇率接口
-        df_fx = ak.com_currency_boc_safe() # 获取最新外汇牌价作为参考
-        current_fx = float(df_fx[df_fx['币种'] == '美元']['中银汇率折算价'].iloc[0]) / 100
+        df_au = df_au[['日期', '收盘']].rename(columns={'日期': 'date', '收盘': 'AU_CN'})
         
-        # 3. 获取国际金价 (美元/盎司) - 伦敦金
-        # 注意：1盎司 = 31.1035克
-        df_global = ak.futures_foreign_hist_em(symbol="GC") # COMEX黄金
-        df_global = df_global[['日期', '收盘']]
-        df_global.columns = ['date', 'AU_Global_USD']
-        df_global['date'] = pd.to_datetime(df_global['date'])
-
+        # 抓取国际 COMEX 黄金 (GC)
+        df_gc = ak.futures_foreign_hist_em(symbol="GC")
+        df_gc = df_gc[['日期', '收盘']].rename(columns={'日期': 'date', '收盘': 'AU_Global'})
+        
+        # 抓取美元汇率 (简单起见使用 7.2 固定或实时接口)
+        # 这里为了稳健使用固定汇率模拟，实战建议接入 ak.fx_spot_quote()
+        fx_rate = 7.24 
+        
         # 合并数据
-        df = pd.merge(df_au, df_global, on='date')
+        df_au['date'] = pd.to_datetime(df_au['date'])
+        df_gc['date'] = pd.to_datetime(df_gc['date'])
+        df = pd.merge(df_au, df_gc, on='date', how='inner').sort_values('date')
         
-        # 4. 核心转换公式：将国际金价折算为 人民币/克
-        # 计算公式：(美元价格 / 31.1035) * 汇率
-        df['AU_Global_CNY'] = (df['AU_Global_USD'] / 31.1035) * current_fx
+        # 换算逻辑：1盎司=31.1035克
+        df['AU_Global_CNY'] = (df['AU_Global'] / 31.1035) * fx_rate
         
-        # 5. 计算价差 (Spread)
-        df['Margin'] = df['AU_Domestic'] - df['AU_Global_CNY']
+        # 计算价差 (单位：元/克)
+        df['Margin'] = df['AU_CN'] - df['AU_Global_CNY']
         
-        return df[df['date'] >= '2021-01-01'].sort_values('date')
+        return df[df['date'] >= '2022-01-01']
     except Exception as e:
-        st.error(f"黄金数据抓取失败: {e}")
+        st.error(f"数据获取失败: {e}")
         return pd.DataFrame()
+
+# --- 4. 统计逻辑与绘图 ---
+df_data = load_gold_arb_data()
+
+if not df_data.empty:
+    df = df_data.copy()
+    df['mean'] = df['Margin'].rolling(window=window).mean()
+    df['std'] = df['Margin'].rolling(window=window).std()
+    df['z_score'] = (df['Margin'] - df['mean']) / df['std']
+    df['upper'] = df['mean'] + 2 * df['std']
+    df['lower'] = df['mean'] - 2 * df['std']
+    
+    # 仪表盘
+    latest = df.iloc[-1]
+    col1, col2, col3 = st.columns(3)
+    col1.metric("内外价差 (元/克)", f"{latest['Margin']:.2f} ¥")
+    col2.metric("Z-Score", f"{latest['z_score']:.2f}")
+    
+    with col3:
+        z = latest['z_score']
+        if z > 2: st.success("🟢 建议：卖国内/买国际")
+        elif z < -2: st.error("🔴 建议：买国内/卖国际")
+        else: st.info("⚪ 建议：价差波动正常")
+
+    # 绘图
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=df['date'], y=df['upper'], line=dict(width=0), showlegend=False))
+    fig.add_trace(go.Scatter(x=df['date'], y=df['lower'], fill='tonexty', 
+                             fillcolor='rgba(255, 215, 0, 0.1)', line=dict(width=0), name="±2σ 统计通道"))
+    fig.add_trace(go.Scatter(x=df['date'], y=df['Margin'], name="内外价差", line=dict(color='gold', width=2)))
+    fig.add_trace(go.Scatter(x=df['date'], y=df['mean'], name="均值", line=dict(dash='dash', color='gray')))
+    
+    fig.update_layout(hovermode="x unified", template="plotly_dark", height=600)
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.warning("暂无数据，请检查网络连接或接口。")
