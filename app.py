@@ -18,35 +18,55 @@ ratio_j = 0.5
 
 # --- 3. 真实数据抓取逻辑 ---
 @st.cache_data(ttl=3600) # 缓存1小时，避免频繁请求封IP
+@st.cache_data(ttl=3600)
 def load_real_data():
     try:
-        # 抓取螺纹钢(RB)、铁矿石(I)、焦炭(J)的主力连续合约数据
-        # 使用东方财富接口获取历史行情
-        rb_df = ak.futures_main_history_em(symbol="RB0")
-        i_df = ak.futures_main_history_em(symbol="I0")
-        j_df = ak.futures_main_history_em(symbol="J0")
+        # 使用更稳健的 get_futures_daily 或替代逻辑获取数据
+        # 标的代码：RB0, I0, J0 分别代表螺纹、铁矿、焦炭的主力连续合约
         
-        # 数据清洗：统一日期格式并合并
+        # 抓取数据（这里使用东财或新浪的通用期货接口）
+        def fetch_commodity(symbol):
+            # 尝试使用最新的主力连续合约接口
+            data = ak.futures_main_history_em(symbol=symbol)
+            return data
+
+        # 如果你的版本确实没有 futures_main_history_em，尝试 fallback 到另一个常用接口
+        try:
+            rb_df = ak.futures_main_history_em(symbol="RB0")
+            i_df = ak.futures_main_history_em(symbol="I0")
+            j_df = ak.futures_main_history_em(symbol="J0")
+        except AttributeError:
+            # Fallback 方案：使用新浪财经的主力合约接口
+            st.warning("正在尝试备用数据源...")
+            rb_df = ak.futures_zh_daily_sina(symbol="RB0")
+            i_df = ak.futures_zh_daily_sina(symbol="I0")
+            j_df = ak.futures_zh_daily_sina(symbol="J0")
+
+        # 数据清洗函数
         def clean_df(df, name):
-            df = df[['日期', '收盘']]
+            # 不同接口返回的列名可能不同，这里做适配
+            if '日期' in df.columns:
+                df = df[['日期', '收盘']]
+            elif 'date' in df.columns:
+                df = df[['date', 'close']]
+            
             df.columns = ['date', name]
             df['date'] = pd.to_datetime(df['date'])
+            df[name] = pd.to_numeric(df[name], errors='coerce')
             return df
 
         rb = clean_df(rb_df, 'RB')
         i = clean_df(i_df, 'I')
         j = clean_df(j_df, 'J')
         
-        # 合并三张表，取交集日期
+        # 合并
         final_df = rb.merge(i, on='date').merge(j, on='date')
-        
-        # 过滤 2021 年至今的数据
         final_df = final_df[final_df['date'] >= '2021-01-01'].sort_values('date')
-        return final_df
-    except Exception as e:
-        st.error(f"行情数据获取失败: {e}")
-        return pd.DataFrame()
+        return final_df.dropna()
 
+    except Exception as e:
+        st.error(f"行情获取失败，请尝试在本地运行 'pip install akshare --upgrade'。详情: {e}")
+        return pd.DataFrame()
 # --- 4. 执行计算 ---
 df_raw = load_real_data()
 
